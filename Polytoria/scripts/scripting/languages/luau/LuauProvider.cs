@@ -1759,37 +1759,75 @@ public sealed partial class LuauProvider : IScriptLanguageProvider
 			handle.Free();
 	}
 
-	public void PushEnum(LuaState lua, Type specifyType, object value)
+	private void PushEnumMetatable(LuaState lua, Type type)
 	{
-		Script script = GetScriptInstance(lua);
+		// doubles as both the metatable AND the value cache for the enum
 
-		GCHandle handle = GCHandle.Alloc(value);
-		IntPtr handlePtr = GCHandle.ToIntPtr(handle);
-		IntPtr userdataPtr = lua.NewUserDataDTor((UIntPtr)IntPtr.Size, GarbageCollect);
-		Marshal.WriteIntPtr(userdataPtr, handlePtr);
+		if (!lua.NewMetaTable("__enum_" + type.Name)) return; // metatable already exists
 
-		_ptrToObject.Add(handlePtr, value);
-
-		lua.GetField(LuaState.LUA_REGISTRYINDEX, specifyType.Name);
-		if (lua.Type(-1) == LuaType.Nil)
+		int toStringFunc(IntPtr L)
 		{
-			lua.Pop(1);
-			lua.NewMetaTable(specifyType.Name);
+			LuaState state = LuaState.FromIntPtr(L);
 
-			LuaEnum enumMeta = new()
+			object? val = LuaToObject(state, 1);
+
+			if (val is int i)
 			{
-				Lua = lua,
-				TargetType = specifyType,
-				LangProvider = this,
-			};
+				state.PushString(type.Name + "." + (Enum.GetName(type, i) ?? ""));
+			}
+			else
+			{
+				state.PushString(type.Name);
+			}
 
-			enumMeta.RegisterMetamethods();
+			return 1;
 		}
+
+		int safeToStringFunc(IntPtr L)
+		{
+			Exception? caughtException;
+
+			try
+			{
+				return toStringFunc(L);
+			}
+			catch (Exception ex)
+			{
+				caughtException = ex;
+			}
+
+			if (caughtException != null)
+			{
+				LuaState state = LuaState.FromIntPtr(L);
+				return state.Error(caughtException.InnerException?.Message ?? caughtException.Message);
+			}
+
+			return 0;
+		}
+
+		lua.PushCFunction(safeToStringFunc, "__tostring");
+		lua.SetField(-2, "__tostring");
 
 		lua.PushBoolean(false);
 		lua.SetField(-2, "__metatable");
+	}
 
-		lua.SetMetaTable(-2);
+	public void PushEnum(LuaState lua, Type type, int value)
+	{
+		PushEnumMetatable(lua, type);
+		lua.RawGetInteger(-1, value);
+		if (lua.IsNil(-1))
+		{
+			lua.Pop(1); // pop nil
+
+			PushNewUserdata(lua, value);
+			lua.PushValue(-2); // copy metatable
+			lua.SetMetaTable(-2); // pop copy of metatable
+
+			lua.PushValue(-1); // copy userdata
+			lua.RawSetInteger(-3, value); // pop copy of userdata
+		}
+		lua.Remove(-2); // pop metatable
 	}
 
 	private static string GetRegKeyFromObj(object obj)
